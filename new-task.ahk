@@ -170,7 +170,8 @@ NewTicketRunner(section := "NewTask") {
     }
 
     ; === Create Notes File ===
-    if (!FileExist(notesFile)) {
+    notesFileExisted := FileExist(notesFile)
+    if (!notesFileExisted) {
         FileAppend,
 (
 Ticket ID: %taskName%
@@ -179,7 +180,7 @@ Ticket Folder: %taskDir%
 
 Zendesk URL: [Zendesk Ticket URL]
 
-Project Owner: %A_Username%
+Ticket Owner: %A_Username%
 
 Org:
 
@@ -191,23 +192,58 @@ Phone Call? (Y/N):
 
 ----------
 
+Issue / Request:
+[What is the customer reporting or asking for?]
+
+Impact:
+[What is prevented, affected, or degraded?]
+
+Environment / Context:
+[Workstation, server, module, environment, hosting/database type, version, etc. as relevant.]
+
+Time(s) Observed:
+[Approximate or exact time(s), if relevant.]
+
+Reproduction / Verification:
+[Steps taken, where tested, whether reproducible, and any known-good comparison.]
+
+----------
+
+Investigation / Findings:
+[Logs, SQL, screenshots, record IDs, services, files, configuration, observations, etc.]
+
+Actions Taken:
+[Changes made, updates run, records corrected, configuration changed, customer contacted, etc.]
+
+----------
+
+Current Status / Blocker:
+[What is the current state? What are we waiting on, if anything?]
+
+Next Step:
+[What should happen next, and who owns it?]
+
+----------
+
 Other Notes:
-[Use this space for anything not covered above.]
+[Anything not covered above.]
 ), %notesFile%
+
+        writeError := ErrorLevel
+        writeLastError := A_LastError
+
+        if (writeError || !FileExist(notesFile)) {
+            DebugLog("FAILED to create notes file: " . notesFile
+                . " | ErrorLevel=" . writeError
+                . " | A_LastError=" . writeLastError, true)
+            MsgBox, 48, Error, Failed to create notes file:`n%notesFile%
+            return
+        }
+
+        DebugLog("Notes file created: " . notesFile, true)
+    } else {
+        DebugLog("Existing notes file left unchanged: " . notesFile)
     }
-
-    writeError := ErrorLevel
-    writeLastError := A_LastError
-
-    if (writeError || !FileExist(notesFile)) {
-        DebugLog("FAILED to create notes file: " . notesFile
-            . " | ErrorLevel=" . writeError
-            . " | A_LastError=" . writeLastError, true)
-        MsgBox, 48, Error, Failed to create notes file:`n%notesFile%
-        return
-    }
-
-    DebugLog("Notes file available: " . notesFile, true)
 
     ; Opening is intentionally last and can never roll back a created ticket.
     OpenCreatedTicket(taskDir, notesFile)
@@ -412,11 +448,20 @@ SaveSettings() {
         writeFailed := true
 
     if (writeFailed) {
+        restoreFailed := false
         IniWrite, %priorBaseDir%, %iniFile%, NewTask, baseDir
+        if (ErrorLevel)
+            restoreFailed := true
         IniWrite, %priorOpenTarget%, %iniFile%, NewTask, openTarget
+        if (ErrorLevel)
+            restoreFailed := true
         IniWrite, %priorEditorMode%, %iniFile%, NewTask, editorMode
+        if (ErrorLevel)
+            restoreFailed := true
         IniWrite, %priorEditorPath%, %iniFile%, NewTask, editorPath
-        return SettingsWriteFailed()
+        if (ErrorLevel)
+            restoreFailed := true
+        return SettingsWriteFailed(restoreFailed)
     }
 
     baseDir := candidateBaseDir
@@ -430,9 +475,14 @@ SaveSettings() {
     return true
 }
 
-SettingsWriteFailed() {
-    DebugLog("Failed to save New Ticket settings.", true)
-    MsgBox, 48, Settings Not Saved, The settings could not be written. The settings window will remain open so you can try again.
+SettingsWriteFailed(restoreFailed := false) {
+    if (restoreFailed) {
+        DebugLog("Failed to save New Ticket settings; one or more prior values could not be restored.", true)
+        MsgBox, 48, Settings Not Saved, The settings could not be written, and one or more prior values could not be restored.`n`nRuntime settings were not changed. The Settings window will remain open so you can review the values or cancel.
+    } else {
+        DebugLog("Failed to save New Ticket settings; prior values were restored.", true)
+        MsgBox, 48, Settings Not Saved, The settings could not be written. Prior values were restored, and runtime settings were not changed.`n`nThe Settings window will remain open so you can try again.
+    }
     return false
 }
 
@@ -601,8 +651,10 @@ VerifyOrInitializeINI() {
     IniRead, repairedEditorMode, %iniFile%, NewTask, editorMode, default
     IniRead, repairedEditorPath, %iniFile%, NewTask, editorPath, __MISSING__
     repairedEditorPath := NormalizeIniBlank(repairedEditorPath)
-    if (repairedEditorMode = "default" and ToLower(Trim(repairedEditorPath)) = "notepad")
+    if (repairedEditorMode = "default" and repairedEditorPath != "") {
         IniWrite, % "", %iniFile%, NewTask, editorPath
+        DebugLog("Cleared editorPath because editorMode uses the Windows default app.", true)
+    }
 
     ; === Final Report Missing Keys (if any) ===
     if (missingKeys.MaxIndex()) {
