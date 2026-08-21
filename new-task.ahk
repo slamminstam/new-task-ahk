@@ -1,7 +1,7 @@
 ;==============================================================================
 ; New Ticket Tool
 ;==============================================================================
-; Version: 1.12.0
+; Version: 1.13.0
 ; Standalone AHK v1.1 script
 ;==============================================================================
 
@@ -11,7 +11,7 @@ SendMode Input
 SetWorkingDir %A_ScriptDir%
 
 ;------------------------------------------------------------------------------
-; Global Paths
+; Global Paths / Runtime Settings
 ;------------------------------------------------------------------------------
 global appDataFolder := A_AppData "\HotKeys\NewTask"
 global backupFolder := appDataFolder "\OldConfigs"
@@ -19,6 +19,12 @@ global iniFile := appDataFolder "\NewTask.ini"
 global logFile := appDataFolder "\NewTask_debug.log"
 global missingKeys
 global debugMode := 0
+global baseDir := ""
+global openTarget := "notes"
+global editorMode := "default"
+global editorPath := ""
+global settingsDialogResult := "cancel"
+global settingsIsFirstRun := false
 
 ;------------------------------------------------------------------------------
 ; Startup
@@ -26,13 +32,50 @@ global debugMode := 0
 EnsureAppFoldersExist()
 VerifyOrInitializeINI()
 LoadDebugMode()
+LoadRuntimeSettings()
+InitializeTrayMenu()
+
+if (baseDir = "")
+    ShowSettings(true)
 
 ;------------------------------------------------------------------------------
 ; Hotkeys
 ;------------------------------------------------------------------------------
 ^!n::NewTicketRunner("NewTask")      ; Ctrl+Alt+N
-^NumpadSub::ToggleDebugMode()      ; Ctrl+NumpadMinus (hidden/power user)
+^NumpadSub::ToggleDebugMode()        ; Ctrl+NumpadMinus (hidden/power user)
 
+return
+
+
+;==============================================================================
+; GUI / Tray Labels
+;==============================================================================
+
+OpenSettingsFromTray:
+ShowSettings(false)
+return
+
+SettingsBrowseBaseDir:
+BrowseForBaseDirectory()
+return
+
+SettingsBrowseEditor:
+BrowseForEditor()
+return
+
+SettingsEditorModeChanged:
+UpdateEditorControls()
+return
+
+SettingsSave:
+SaveSettings()
+return
+
+SettingsCancel:
+SettingsGuiClose:
+SettingsGuiEscape:
+settingsDialogResult := "cancel"
+Gui, Settings:Destroy
 return
 
 
@@ -45,28 +88,17 @@ return
 ;------------------------------------------------------------------------------
 NewTicketRunner(section := "NewTask") {
     global iniFile
-    global debugMode
+    global baseDir
 
-    ; === LOAD CONFIG FROM INI ===
-    IniRead, baseDir, %iniFile%, %section%, baseDir,
+    ; Runtime settings are loaded centrally so tray changes apply immediately.
+    if (baseDir = "") {
+        if !ShowSettings(true)
+            return
+    }
+
+    ; Preserve existing configuration reads used by the ticket workflow.
     IniRead, taskFile, %iniFile%, %section%, taskFile, notes.txt
     IniRead, taskPrefix, %iniFile%, %section%, taskPrefix, Task
-    IniRead, openAfter, %iniFile%, %section%, openOnCreate, true
-    IniRead, editorPath, %iniFile%, %section%, editorPath, notepad
-
-    ; Normalize boolean-ish value
-    openAfter := (openAfter = "1" or openAfter = "true")
-
-    if (baseDir = "") {
-        MsgBox, 48, Configuration Required, This is your first time running the script, or no ticket storage location has been set.`n`nPlease select a folder to store your ticket files.
-        FileSelectFolder, baseDir, , 3, Select a folder to store your ticket files:
-        if (ErrorLevel || baseDir = "") {
-            MsgBox, 48, Error, No directory selected. Exiting.
-            return
-        }
-        IniWrite, %baseDir%, %iniFile%, NewTask, baseDir
-        DebugLog("Base project directory selected: " . baseDir, true)
-    }
 
     ; === Prompt for Ticket ID ===
     InputBox, taskName, Ticket ID, Enter the Ticket ID:`nFormat: 12345 - Optional Subject,, 600, 150
@@ -143,6 +175,8 @@ NewTicketRunner(section := "NewTask") {
 (
 Ticket ID: %taskName%
 
+Ticket Folder: %taskDir%
+
 Zendesk URL: [Zendesk Ticket URL]
 
 Project Owner: %A_Username%
@@ -162,25 +196,292 @@ Other Notes:
 ), %notesFile%
     }
 
-        writeError := ErrorLevel
-        writeLastError := A_LastError
+    writeError := ErrorLevel
+    writeLastError := A_LastError
 
-        if (writeError || !FileExist(notesFile)) {
-            DebugLog("FAILED to create notes file: " . notesFile
-                . " | ErrorLevel=" . writeError
-                . " | A_LastError=" . writeLastError, true)
-            MsgBox, 48, Error, Failed to create notes file:`n%notesFile%
-            return
-        }
-
-        DebugLog("Notes file created: " . notesFile, true)
-
-    ; === Offer to Open Folder ===
-    if (openAfter) {
-        MsgBox, 36, Open Directory, Would you like to open the task folder now?
-        IfMsgBox Yes
-            Run, %taskDir%
+    if (writeError || !FileExist(notesFile)) {
+        DebugLog("FAILED to create notes file: " . notesFile
+            . " | ErrorLevel=" . writeError
+            . " | A_LastError=" . writeLastError, true)
+        MsgBox, 48, Error, Failed to create notes file:`n%notesFile%
+        return
     }
+
+    DebugLog("Notes file available: " . notesFile, true)
+
+    ; Opening is intentionally last and can never roll back a created ticket.
+    OpenCreatedTicket(taskDir, notesFile)
+}
+
+;------------------------------------------------------------------------------
+; Function: Open the configured post-create target(s)
+;------------------------------------------------------------------------------
+OpenCreatedTicket(taskDir, notesFile) {
+    global openTarget
+
+    if (openTarget = "folder" or openTarget = "both")
+        OpenTicketFolder(taskDir)
+
+    ; Open notes last for the combined mode so the document gets focus.
+    if (openTarget = "notes" or openTarget = "both")
+        OpenNotesFile(notesFile)
+}
+
+;------------------------------------------------------------------------------
+; Function: Open generated notes using default association or custom editor
+;------------------------------------------------------------------------------
+OpenNotesFile(notesFile) {
+    global editorMode
+    global editorPath
+
+    if (editorMode = "custom") {
+        if !FileExist(editorPath) {
+            DebugLog("Configured custom editor was not found; using Windows default app.", true)
+            MsgBox, 48, Notes Editor Not Found, The configured notes editor could not be found.`n`nThe notes file will be opened with your Windows default app instead.`n`nYou can change the editor from the tray-menu New Ticket Settings option.
+            Run, % """" . notesFile . """",, UseErrorLevel
+        } else {
+            Run, % """" . editorPath . """ """ . notesFile . """",, UseErrorLevel
+        }
+    } else {
+        Run, % """" . notesFile . """",, UseErrorLevel
+    }
+
+    if (ErrorLevel)
+        DebugLog("Failed to open notes file. Run error: " . ErrorLevel, true)
+}
+
+;------------------------------------------------------------------------------
+; Function: Open generated ticket folder
+;------------------------------------------------------------------------------
+OpenTicketFolder(taskDir) {
+    Run, % """" . taskDir . """",, UseErrorLevel
+    if (ErrorLevel)
+        DebugLog("Failed to open ticket folder. Run error: " . ErrorLevel, true)
+}
+
+
+;==============================================================================
+; Settings UI
+;==============================================================================
+
+;------------------------------------------------------------------------------
+; Function: Build and display reusable first-run/settings GUI
+;------------------------------------------------------------------------------
+ShowSettings(isFirstRun := false) {
+    global baseDir
+    global openTarget
+    global editorMode
+    global editorPath
+    global settingsDialogResult
+    global settingsIsFirstRun
+    global settingsBaseDir
+    global settingsOpenTarget
+    global settingsEditorMode
+    global settingsEditorPath
+    global settingsOpenNotes
+    global settingsOpenFolder
+    global settingsOpenBoth
+    global settingsOpenNone
+    global settingsEditorDefault
+    global settingsEditorCustom
+    global settingsEditorBrowse
+
+    if WinExist("New Ticket Settings ahk_class AutoHotkeyGUI") {
+        WinActivate
+        return false
+    }
+
+    settingsDialogResult := "cancel"
+    settingsIsFirstRun := isFirstRun
+    settingsBaseDir := baseDir
+    settingsOpenTarget := openTarget
+    settingsEditorMode := editorMode
+    settingsEditorPath := editorPath
+    checkedOpenNotes := (settingsOpenTarget = "notes") ? "Checked" : ""
+    checkedOpenFolder := (settingsOpenTarget = "folder") ? "Checked" : ""
+    checkedOpenBoth := (settingsOpenTarget = "both") ? "Checked" : ""
+    checkedOpenNone := (settingsOpenTarget = "none") ? "Checked" : ""
+    checkedEditorDefault := (settingsEditorMode = "default") ? "Checked" : ""
+    checkedEditorCustom := (settingsEditorMode = "custom") ? "Checked" : ""
+
+    Gui, Settings:New, +OwnDialogs +AlwaysOnTop, New Ticket Settings
+    Gui, Settings:Margin, 14, 12
+    Gui, Settings:Font, s9, Segoe UI
+
+    if (isFirstRun)
+        Gui, Settings:Add, Text, w520, All fields are required for first-time setup. Save writes all settings together; Cancel leaves the current configuration unchanged.
+
+    Gui, Settings:Add, GroupBox, xm w540 h70 Section, Ticket storage folder
+    Gui, Settings:Add, Edit, xs+12 ys+25 w420 vsettingsBaseDir, %settingsBaseDir%
+    Gui, Settings:Add, Button, x+8 yp-1 w82 gSettingsBrowseBaseDir, Browse...
+
+    Gui, Settings:Add, GroupBox, xm y+14 w540 h145 Section, After creating a ticket, open:
+    Gui, Settings:Add, Radio, xs+12 ys+25 vsettingsOpenNotes %checkedOpenNotes%, Notes
+    Gui, Settings:Add, Radio, xp yp+25 vsettingsOpenFolder %checkedOpenFolder%, Ticket Folder
+    Gui, Settings:Add, Radio, xp yp+25 vsettingsOpenBoth %checkedOpenBoth%, Notes and Ticket Folder
+    Gui, Settings:Add, Radio, xp yp+25 vsettingsOpenNone %checkedOpenNone%, Nothing
+
+    Gui, Settings:Add, GroupBox, xm y+14 w540 h145 Section, Notes editor
+    Gui, Settings:Add, Radio, xs+12 ys+25 vsettingsEditorDefault gSettingsEditorModeChanged %checkedEditorDefault%, Use my Windows default app for .txt files
+    Gui, Settings:Add, Radio, xp yp+25 vsettingsEditorCustom gSettingsEditorModeChanged %checkedEditorCustom%, Use a specific application
+    Gui, Settings:Add, Edit, xp y+28 w395 vsettingsEditorPath, %settingsEditorPath%
+    Gui, Settings:Add, Button, x+8 yp-1 w82 vsettingsEditorBrowse gSettingsBrowseEditor, Browse...
+    Gui, Settings:Add, Text, xs+12 y+34 w500 c555555, Plain-text (.txt) notes only. Word and OneNote note formats are not supported in this version.
+
+    Gui, Settings:Add, Button, xm+358 y+18 w85 Default gSettingsSave, Save
+    Gui, Settings:Add, Button, x+10 w85 gSettingsCancel, Cancel
+
+    UpdateEditorControls()
+    Gui, Settings:Show, AutoSize Center
+    WinWaitClose, New Ticket Settings ahk_class AutoHotkeyGUI
+    return (settingsDialogResult = "saved")
+}
+
+;------------------------------------------------------------------------------
+; Function: Persist validated settings and update runtime immediately
+;------------------------------------------------------------------------------
+SaveSettings() {
+    global iniFile
+    global baseDir
+    global openTarget
+    global editorMode
+    global editorPath
+    global settingsDialogResult
+    global settingsBaseDir
+    global settingsEditorPath
+    global settingsOpenNotes
+    global settingsOpenFolder
+    global settingsOpenBoth
+    global settingsOpenNone
+    global settingsEditorDefault
+    global settingsEditorCustom
+
+    Gui, Settings:Submit, NoHide
+    candidateBaseDir := Trim(settingsBaseDir)
+    candidateEditorPath := Trim(settingsEditorPath, " `t""")
+
+    if (candidateBaseDir = "" or !InStr(FileExist(candidateBaseDir), "D")) {
+        MsgBox, 48, Invalid Ticket Folder, Select an existing ticket storage directory before saving.
+        return false
+    }
+
+    if (settingsOpenFolder)
+        candidateOpenTarget := "folder"
+    else if (settingsOpenBoth)
+        candidateOpenTarget := "both"
+    else if (settingsOpenNone)
+        candidateOpenTarget := "none"
+    else
+        candidateOpenTarget := "notes"
+
+    candidateEditorMode := settingsEditorCustom ? "custom" : "default"
+    if (candidateEditorMode = "custom") {
+        if (candidateEditorPath = "" or FileExist(candidateEditorPath) = "" or InStr(FileExist(candidateEditorPath), "D")) {
+            MsgBox, 48, Invalid Notes Editor, Select a valid editor executable before saving.
+            return false
+        }
+        SplitPath, candidateEditorPath,,, candidateEditorExt
+        if (ToLower(candidateEditorExt) != "exe") {
+            MsgBox, 48, Invalid Notes Editor, The custom notes editor must be an executable (.exe) file.
+            return false
+        }
+    } else {
+        candidateEditorPath := ""
+    }
+
+    ; Validate everything first, then write the complete settings group. Keep
+    ; prior values so an unexpected INI write failure cannot leave a partial set.
+    IniRead, priorBaseDir, %iniFile%, NewTask, baseDir,
+    IniRead, priorOpenTarget, %iniFile%, NewTask, openTarget, notes
+    IniRead, priorEditorMode, %iniFile%, NewTask, editorMode, default
+    IniRead, priorEditorPath, %iniFile%, NewTask, editorPath, __MISSING__
+    priorEditorPath := NormalizeIniBlank(priorEditorPath)
+    writeFailed := false
+
+    IniWrite, %candidateBaseDir%, %iniFile%, NewTask, baseDir
+    if (ErrorLevel)
+        writeFailed := true
+    IniWrite, %candidateOpenTarget%, %iniFile%, NewTask, openTarget
+    if (ErrorLevel)
+        writeFailed := true
+    IniWrite, %candidateEditorMode%, %iniFile%, NewTask, editorMode
+    if (ErrorLevel)
+        writeFailed := true
+    IniWrite, %candidateEditorPath%, %iniFile%, NewTask, editorPath
+    if (ErrorLevel)
+        writeFailed := true
+
+    if (writeFailed) {
+        IniWrite, %priorBaseDir%, %iniFile%, NewTask, baseDir
+        IniWrite, %priorOpenTarget%, %iniFile%, NewTask, openTarget
+        IniWrite, %priorEditorMode%, %iniFile%, NewTask, editorMode
+        IniWrite, %priorEditorPath%, %iniFile%, NewTask, editorPath
+        return SettingsWriteFailed()
+    }
+
+    baseDir := candidateBaseDir
+    openTarget := candidateOpenTarget
+    editorMode := candidateEditorMode
+    editorPath := candidateEditorPath
+    settingsDialogResult := "saved"
+
+    DebugLog("New Ticket settings saved (open target and editor mode updated).", true)
+    Gui, Settings:Destroy
+    return true
+}
+
+SettingsWriteFailed() {
+    DebugLog("Failed to save New Ticket settings.", true)
+    MsgBox, 48, Settings Not Saved, The settings could not be written. The settings window will remain open so you can try again.
+    return false
+}
+
+;------------------------------------------------------------------------------
+; Function: Browse for ticket storage directory
+;------------------------------------------------------------------------------
+BrowseForBaseDirectory() {
+    global settingsBaseDir
+
+    Gui, Settings:+OwnDialogs
+    FileSelectFolder, selectedDir, *%settingsBaseDir%, 3, Select a folder to store your ticket files:
+    if (!ErrorLevel and selectedDir != "") {
+        settingsBaseDir := selectedDir
+        GuiControl, Settings:, settingsBaseDir, %settingsBaseDir%
+    }
+}
+
+;------------------------------------------------------------------------------
+; Function: Browse for custom editor executable
+;------------------------------------------------------------------------------
+BrowseForEditor() {
+    global settingsEditorPath
+
+    Gui, Settings:+OwnDialogs
+    FileSelectFile, selectedEditor, 3, %settingsEditorPath%, Select a notes editor executable, Applications (*.exe)
+    if (!ErrorLevel and selectedEditor != "") {
+        settingsEditorPath := selectedEditor
+        GuiControl, Settings:, settingsEditorPath, %settingsEditorPath%
+        GuiControl, Settings:, settingsEditorCustom, 1
+        UpdateEditorControls()
+    }
+}
+
+;------------------------------------------------------------------------------
+; Function: Enable custom-editor fields only when custom mode is selected
+;------------------------------------------------------------------------------
+UpdateEditorControls() {
+    GuiControlGet, customMode, Settings:, settingsEditorCustom
+    controlAction := customMode ? "Enable" : "Disable"
+    GuiControl, Settings:%controlAction%, settingsEditorPath
+    GuiControl, Settings:%controlAction%, settingsEditorBrowse
+}
+
+;------------------------------------------------------------------------------
+; Function: Add Settings without replacing standard tray commands
+;------------------------------------------------------------------------------
+InitializeTrayMenu() {
+    Menu, Tray, Add
+    Menu, Tray, Add, New Ticket Settings..., OpenSettingsFromTray
 }
 
 
@@ -228,35 +529,80 @@ AutoFixINI(section, key, defaultValue) {
 }
 
 ;------------------------------------------------------------------------------
-; Function: VerifyOrInitializeINI
-; Purpose : Verify, repair, and initialize NewTask.ini
+; Function: Verify, migrate, repair, and initialize NewTask.ini
 ;------------------------------------------------------------------------------
 VerifyOrInitializeINI() {
     global iniFile
     global backupFolder
     global missingKeys
 
-    latestConfigVersion := "1.1"
+    latestConfigVersion := "1.2"
     missingKeys := []
+    iniExisted := FileExist(iniFile)
 
     ; === Backup Existing INI ===
-    if FileExist(iniFile) {
+    if (iniExisted) {
         FormatTime, nowReadable,, yyyyMMdd_HHmmss
         backupPath := backupFolder "\NewTask_backup_" . nowReadable . ".ini"
         FileCopy, %iniFile%, %backupPath%, 1
         TrimBackups()
     }
 
+    ; Read legacy values before adding new defaults so migration can distinguish
+    ; an existing installation from a fresh one.
+    IniRead, existingOpenTarget, %iniFile%, NewTask, openTarget, __MISSING__
+    IniRead, legacyOpenOnCreate, %iniFile%, NewTask, openOnCreate, true
+    IniRead, existingEditorMode, %iniFile%, NewTask, editorMode, __MISSING__
+    IniRead, legacyEditorPath, %iniFile%, NewTask, editorPath, __MISSING__
+    normalizedLegacyEditor := NormalizeIniBlank(legacyEditorPath)
+
     ; --- [Settings] Section ---
     AutoFixINI("Settings", "debugMode", 0)
-    AutoFixINI("Settings", "configVersion", latestConfigVersion)
 
     ; --- [NewTask] Section ---
     AutoFixINI("NewTask", "baseDir", "")
     AutoFixINI("NewTask", "taskFile", "notes.txt")
     AutoFixINI("NewTask", "taskPrefix", "Task")
+
+    if (existingOpenTarget = "__MISSING__" or existingOpenTarget = "") {
+        migratedOpenTarget := IsTrueValue(legacyOpenOnCreate) ? "notes" : "none"
+        IniWrite, %migratedOpenTarget%, %iniFile%, NewTask, openTarget
+        DebugLog("Migrated post-create preference to openTarget=" . migratedOpenTarget . ".", true)
+    } else if !IsValidOpenTarget(existingOpenTarget) {
+        IniWrite, notes, %iniFile%, NewTask, openTarget
+        DebugLog("Repaired invalid openTarget value to notes.", true)
+    }
+
+    if (existingEditorMode = "__MISSING__" or existingEditorMode = "") {
+        normalizedLegacyEditor := Trim(normalizedLegacyEditor, " `t""")
+        if (normalizedLegacyEditor = "" or ToLower(normalizedLegacyEditor) = "notepad") {
+            IniWrite, default, %iniFile%, NewTask, editorMode
+            IniWrite, % "", %iniFile%, NewTask, editorPath
+            DebugLog("Migrated notes editor preference to Windows default app.", true)
+        } else {
+            IniWrite, custom, %iniFile%, NewTask, editorMode
+            DebugLog("Migrated notes editor preference to custom mode.", true)
+        }
+    } else if (existingEditorMode = "custom" and normalizedLegacyEditor = "") {
+        IniWrite, default, %iniFile%, NewTask, editorMode
+        IniWrite, % "", %iniFile%, NewTask, editorPath
+        DebugLog("Repaired incomplete custom editor preference to Windows default app.", true)
+    } else if (existingEditorMode != "default" and existingEditorMode != "custom") {
+        IniWrite, default, %iniFile%, NewTask, editorMode
+        DebugLog("Repaired invalid editorMode value to default.", true)
+    }
+
+    ; Fresh configurations also retain this compatibility key, but runtime
+    ; behavior is controlled exclusively by openTarget.
     AutoFixINI("NewTask", "openOnCreate", "true")
-    AutoFixINI("NewTask", "editorPath", "notepad")
+
+    ; IniWrite cannot reliably express an empty value in every v1 environment;
+    ; ensure the key exists, then normalize the historical notepad default.
+    IniRead, repairedEditorMode, %iniFile%, NewTask, editorMode, default
+    IniRead, repairedEditorPath, %iniFile%, NewTask, editorPath, __MISSING__
+    repairedEditorPath := NormalizeIniBlank(repairedEditorPath)
+    if (repairedEditorMode = "default" and ToLower(Trim(repairedEditorPath)) = "notepad")
+        IniWrite, % "", %iniFile%, NewTask, editorPath
 
     ; === Final Report Missing Keys (if any) ===
     if (missingKeys.MaxIndex()) {
@@ -267,15 +613,63 @@ VerifyOrInitializeINI() {
         }
         DebugLog("INI repaired and fully verified.", true)
     } else {
-        DebugLog("No missing keys detected. INI verified clean.", true)
+        DebugLog("No missing legacy keys detected. INI verified clean.", true)
     }
 
     ; === Ensure Config Version is Synced ===
-    IniRead, configVersion, %iniFile%, Settings, configVersion
+    IniRead, configVersion, %iniFile%, Settings, configVersion, 0
     if (CompareVersions(configVersion, latestConfigVersion) < 0) {
         IniWrite, %latestConfigVersion%, %iniFile%, Settings, configVersion
         DebugLog("Config version synced to " . latestConfigVersion, true)
+    } else if (configVersion = "ERROR" or configVersion = "") {
+        IniWrite, %latestConfigVersion%, %iniFile%, Settings, configVersion
+        DebugLog("Repaired: Settings/configVersion", true)
     }
+}
+
+;------------------------------------------------------------------------------
+; Function: Load post-create settings used at runtime
+;------------------------------------------------------------------------------
+LoadRuntimeSettings() {
+    global iniFile
+    global baseDir
+    global openTarget
+    global editorMode
+    global editorPath
+
+    IniRead, baseDir, %iniFile%, NewTask, baseDir,
+    IniRead, openTarget, %iniFile%, NewTask, openTarget, notes
+    IniRead, editorMode, %iniFile%, NewTask, editorMode, default
+    IniRead, editorPath, %iniFile%, NewTask, editorPath, __MISSING__
+    editorPath := NormalizeIniBlank(editorPath)
+
+    if !IsValidOpenTarget(openTarget)
+        openTarget := "notes"
+    if (editorMode != "default" and editorMode != "custom")
+        editorMode := "default"
+    if (editorMode = "default")
+        editorPath := ""
+}
+
+IsValidOpenTarget(value) {
+    return (value = "notes" or value = "folder" or value = "both" or value = "none")
+}
+
+IsTrueValue(value) {
+    value := ToLower(Trim(value))
+    return (value = "1" or value = "true" or value = "yes" or value = "on")
+}
+
+ToLower(value) {
+    StringLower, lowerValue, value
+    return lowerValue
+}
+
+NormalizeIniBlank(value) {
+    value := Trim(value, " `t""")
+    if (value = "ERROR" or value = "__MISSING__")
+        return ""
+    return value
 }
 
 ;------------------------------------------------------------------------------
@@ -393,3 +787,4 @@ DebugLog(message, force := false) {
         FileAppend, [%timestamp%] %message%`n, %resolvedLogFile%
     }
 }
+
