@@ -1,5 +1,5 @@
 ;==============================================================================
-; New Task Tool
+; New Ticket Tool
 ;==============================================================================
 ; Version: 1.12.0
 ; Standalone AHK v1.1 script
@@ -13,7 +13,7 @@ SetWorkingDir %A_ScriptDir%
 ;------------------------------------------------------------------------------
 ; Global Paths
 ;------------------------------------------------------------------------------
-global appDataFolder := A_AppData "\TeamHotKeys\NewTask"
+global appDataFolder := A_AppData "\HotKeys\NewTask"
 global backupFolder := appDataFolder "\OldConfigs"
 global iniFile := appDataFolder "\NewTask.ini"
 global logFile := appDataFolder "\NewTask_debug.log"
@@ -30,7 +30,7 @@ LoadDebugMode()
 ;------------------------------------------------------------------------------
 ; Hotkeys
 ;------------------------------------------------------------------------------
-^!n::NewTaskRunner("NewTask")      ; Ctrl+Alt+N
+^!n::NewTicketRunner("NewTask")      ; Ctrl+Alt+N
 ^NumpadSub::ToggleDebugMode()      ; Ctrl+NumpadMinus (hidden/power user)
 
 return
@@ -41,9 +41,9 @@ return
 ;==============================================================================
 
 ;------------------------------------------------------------------------------
-; Function: New Task Tool - Build Folder Structure for each new task/project
+; Function: New Ticket Tool - Build Folder Structure for each new Ticket
 ;------------------------------------------------------------------------------
-NewTaskRunner(section := "NewTask") {
+NewTicketRunner(section := "NewTask") {
     global iniFile
     global debugMode
 
@@ -58,8 +58,8 @@ NewTaskRunner(section := "NewTask") {
     openAfter := (openAfter = "1" or openAfter = "true")
 
     if (baseDir = "") {
-        MsgBox, 48, Configuration Required, This is your first time running the script, or no project storage location has been set.`n`nPlease select a folder to store your projects.
-        FileSelectFolder, baseDir, , 3, Select a folder to store your project files:
+        MsgBox, 48, Configuration Required, This is your first time running the script, or no ticket storage location has been set.`n`nPlease select a folder to store your ticket files.
+        FileSelectFolder, baseDir, , 3, Select a folder to store your ticket files:
         if (ErrorLevel || baseDir = "") {
             MsgBox, 48, Error, No directory selected. Exiting.
             return
@@ -68,16 +68,16 @@ NewTaskRunner(section := "NewTask") {
         DebugLog("Base project directory selected: " . baseDir, true)
     }
 
-    ; === Prompt for Task Name ===
-    InputBox, taskName, Project/Task Name, Enter the project/task name:`nFormat: ####### | Task Title,, 600, 150
+    ; === Prompt for Ticket ID ===
+    InputBox, taskName, Ticket ID, Enter the Ticket ID:`nFormat: 12345 - Optional Subject,, 600, 150
     if (ErrorLevel or taskName = "") {
-        MsgBox, 48, Error, No task name provided. Exiting.
+        MsgBox, 48, Error, No ticket ID provided. Exiting.
         return
     }
 
     ; === Validate Format ===
-    if !RegExMatch(taskName, "^\s*.*\d{7} \| .+$") {
-        MsgBox, 48, Error, Invalid format.`n`nMust match: ####### | Task Title
+    if !RegExMatch(taskName, "^\s*.*\d{5}.*$") {
+        MsgBox, 48, Error, Invalid format.`n`nMust match: ##### - Optional Subject
         return
     }
 
@@ -100,7 +100,7 @@ NewTaskRunner(section := "NewTask") {
     taskDir := projectDir "\" sanitizedTaskName
 
     DebugLog("Project directory: " . projectDir)
-    DebugLog("Task directory: " . taskDir)
+    DebugLog("Ticket directory: " . taskDir)
 
     ; === Create Folders ===
     dirList := projectDir . "`n" . taskDir
@@ -116,17 +116,15 @@ NewTaskRunner(section := "NewTask") {
         }
     }
 
-    ; === Extract Prefix for Notes Filename ===
-    StringSplit, taskParts, taskName, |
-    prefix := Trim(taskParts1)
-    notesFile := taskDir "\" prefix "_notes.txt"
+    ; === Build Notes Filename ===
+    notesFile := taskDir "\" sanitizedTaskName "_notes.txt"
 
     ; === Create Supporting Subfolders ===
-    draftDir := taskDir "\Drafts"
-    versionsDir := taskDir "\Versions"
+    logsDir := taskDir "\Logs"
+    otherDir := taskDir "\Etc"
     imagesDir := taskDir "\Images"
 
-    subdirs := draftDir . "`n" . versionsDir . "`n" . imagesDir
+    subdirs := logsDir . "`n" . otherDir . "`n" . imagesDir
     Loop, Parse, subdirs, `n, `r
     {
         if !FileExist(A_LoopField) {
@@ -143,68 +141,39 @@ NewTaskRunner(section := "NewTask") {
     if (!FileExist(notesFile)) {
         FileAppend,
 (
-Task/Project Name: %taskName%
+Ticket ID: %taskName%
 
-Adobe Workfront URL: [Paste Task URL here]
-Related Project URL: [Paste Project URL here]
-Project Documents Folder: [Paste Workfront Docs Folder here]
+Zendesk URL: [Zendesk Ticket URL]
 
-Project Owner:
+Project Owner: %A_Username%
+
+Org:
 
 Requester:
 
-Backup POC:
+Form:
 
-----------
-
-SOP Request Details:
-
-SOP Content Type Impacted:
-SOP Initial Scope:
-Summary:
-Project Description:
-
-🌎 Impacted Stores:
-
-Desired Delivery Date Flexibility:
-Need By:
-
-----------
-
-Intake Notes:
-[Add notes or observations from intake, planning, or staging review here.]
-
-----------
-
-GUID Summary Table:
-Staged?     Translated?     Published?    Words(Pre)    Words(Post)        GUID        Title
-[X]         [X]             [X]           ####          ####               GUID_VALUE  Title Here
-...
-
-[Include any GUID-specific notes or conditional formatting reminders.]
-
-----------
-
-Image Assets:
-- Save to: %imagesDir%
-- Description or reference (e.g., "Handle a Dispute - zh-CN layer screenshots"):
-...
-
-Locales Needing Uploads (e.g., jp-JP, ko-KR, zh-CN, de-DE):
--
--
--
--
+Phone Call? (Y/N): 
 
 ----------
 
 Other Notes:
 [Use this space for anything not covered above.]
 ), %notesFile%
-        DebugLog("Notes file created: " . notesFile, true)
-    } else {
-        DebugLog("Notes file already existed: " . notesFile)
     }
+
+        writeError := ErrorLevel
+        writeLastError := A_LastError
+
+        if (writeError || !FileExist(notesFile)) {
+            DebugLog("FAILED to create notes file: " . notesFile
+                . " | ErrorLevel=" . writeError
+                . " | A_LastError=" . writeLastError, true)
+            MsgBox, 48, Error, Failed to create notes file:`n%notesFile%
+            return
+        }
+
+        DebugLog("Notes file created: " . notesFile, true)
 
     ; === Offer to Open Folder ===
     if (openAfter) {
